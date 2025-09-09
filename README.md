@@ -2,15 +2,13 @@
 
 ## *Using End-to-End Reinforcement Learning for Robot Parkour* ##
 
-<video controls="" width="600" height="350" muted="" loop="" autoplay="">
-<source src="https://github.com/user-attachments/assets/b4d05b9f-c81f-4103-9452-c1887bcc6501" type="video/mp4">
-</video>
+https://github.com/user-attachments/assets/b4d05b9f-c81f-4103-9452-c1887bcc6501
 
-<video controls="" width="600" height="350" muted="" loop="" autoplay="">
-<source src="https://github.com/user-attachments/assets/832f0158-6598-40ce-ad40-ebed43a1a39d" type="video/mp4">
-</video>
+https://github.com/user-attachments/assets/832f0158-6598-40ce-ad40-ebed43a1a39d
 
 ---
+
+### Description ###
 
 RL framework for teaching the Unitree Go2 robot to do parkour autonomously. Includes deployment code for the Go2 EDU. 
 This repo takes `legged_gym` from the Robotics Systems Lab and adds:
