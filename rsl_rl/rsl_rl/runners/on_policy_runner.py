@@ -1,0 +1,309 @@
+# on_policy_runner.py
+import time
+import os
+from collections import deque
+import statistics
+
+from torch.utils.tensorboard import SummaryWriter
+import torch
+
+from rsl_rl.algorithms import PPO
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
+from rsl_rl.modules.support_networks import MlpEstimator, ScanEncoder
+from rsl_rl.env import VecEnv
+
+
+class OnPolicyRunner:
+
+    def __init__(self,
+                 env: VecEnv,
+                 train_cfg,
+                 log_dir=None,
+                 device='cpu'):
+
+        self.cfg=train_cfg["runner"]
+        self.alg_cfg = train_cfg["algorithm"]
+        self.policy_cfg = train_cfg["policy"]
+        self.device = device
+        self.env = env
+
+        print("\nRESUME?: ", self.cfg["resume"])
+        
+        # =========================================================================
+        # Instantiate ActorCritic class instance
+        actor_critic = ActorCritic(num_proprio=self.env.num_proprio,
+                                   num_privileged_obs=self.env.num_privileged_obs,
+                                   num_critic_obs=self.env.num_critic_obs,
+                                   num_estimated_obs=self.env.num_estimated_obs,
+                                   num_scan_obs=self.env.num_scan_obs,
+                                   num_actions=self.env.num_actions,
+                                   history_buffer_length=self.env.history_buffer_length,
+                                   actor_hidden_dims=self.policy_cfg["actor_hidden_dims"],                  # Actor hidden dims
+                                   critic_hidden_dims=self.policy_cfg["critic_hidden_dims"],                # Critic hidden dims
+                                   priv_encoder_hidden_dims=self.policy_cfg["priv_encoder_hidden_dims"],    # Priv hidden dims
+                                   scan_encoder_hidden_dims=self.policy_cfg["scan_encoder_hidden_dims"],    # Scan hidden dims
+                                   latent_encoder_output_dim=self.policy_cfg["latent_encoder_output_dim"],
+                                   scan_encoder_output_dim=self.policy_cfg["scan_encoder_output_dim"],
+                                   activation=self.policy_cfg["activation"],
+                                   init_noise_std=self.policy_cfg["init_noise_std"]
+                                   )
+        
+
+        estimator = MlpEstimator(num_proprio=self.env.num_proprio,
+                                 history_buffer_length=self.env.history_buffer_length,
+                                 output_dim=self.env.num_estimated_obs,
+                                 hidden_dims=self.policy_cfg["estimator_hidden_dims"],
+                                 activation=self.policy_cfg["activation"],
+                                 use_history=self.policy_cfg["use_history"]
+                                 )
+        
+
+        self.alg = PPO(actor_critic=actor_critic,
+                       estimator=estimator,
+                       num_learning_epochs=self.alg_cfg["num_learning_epochs"],
+                       num_mini_batches=self.alg_cfg["num_mini_batches"],
+                       clip_param=self.alg_cfg["clip_param"],
+                       gamma=self.alg_cfg["gamma"],
+                       lam=self.alg_cfg["lam"],
+                       value_loss_coef=self.alg_cfg["value_loss_coef"],
+                       entropy_coef=self.alg_cfg["entropy_coef"],
+                       learning_rate=self.alg_cfg["learning_rate"],
+                       estimator_learning_rate=self.alg_cfg["estimator_learning_rate"],
+                       max_grad_norm=self.alg_cfg["max_grad_norm"],
+                       use_clipped_value_loss=self.alg_cfg["use_clipped_value_loss"],
+                       schedule=self.alg_cfg["schedule"],
+                       desired_kl=self.alg_cfg["desired_kl"],
+                       resume=self.cfg["resume"], # Resume will change ROA schedule coefs
+                       device=self.device,
+                       )
+        
+        self.dagger_update_freq = self.alg_cfg["dagger_update_freq"]
+        # =========================================================================
+
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.save_interval = self.cfg["save_interval"]
+
+        # init storage and model
+        self.alg.init_storage(num_envs=self.env.num_envs, 
+                              num_transitions_per_env=self.num_steps_per_env, 
+                              total_obs_shape=[self.env.num_obs], 
+                              privileged_obs_shape=[self.env.num_privileged_obs],
+                              critic_obs_shape=[self.env.num_critic_obs],
+                              estimated_obs_shape=[self.env.num_estimated_obs],
+                              scan_obs_shape=[self.env.num_scan_obs],
+                              action_shape=[self.env.num_actions],
+                              )
+
+        # Log
+        self.log_dir = log_dir
+        self.writer = None
+        self.tot_timesteps = 0
+        self.tot_time = 0
+        self.current_learning_iteration = 0
+
+        # Reset environment
+        _, _, _, _, _ = self.env.reset()
+    
+    def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        # Init these for Tensorboard logging
+        mean_value_loss = 0.0
+        mean_surrogate_loss = 0.0
+        mean_regularization_loss = 0.0
+        mean_adaptation_loss = 0.0
+        mean_estimator_loss = 0.0
+        reg_coef = 0.0
+        
+        # initialize writer
+        if self.log_dir is not None and self.writer is None:
+            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+        
+        # init at random episode length
+        if init_at_random_ep_len:
+            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+        
+        # Get observation buffers
+        obs = self.env.get_observations()
+        privileged_obs = self.env.get_privileged_observations()
+        critic_obs = self.env.get_critic_observations()
+        true_estimated_obs = self.env.get_estimated_observations()
+        scan_obs = self.env.get_scan_observations()
+
+        # Move to device
+        obs, privileged_obs, critic_obs, true_estimated_obs, scan_obs = obs.to(self.device), privileged_obs.to(self.device), critic_obs.to(self.device), true_estimated_obs.to(self.device), scan_obs.to(self.device)
+
+        # Set up training mode
+        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+
+        ep_infos = []
+        rewbuffer = deque(maxlen=100)
+        lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+
+        tot_iter = self.current_learning_iteration + num_learning_iterations
+        for it in range(self.current_learning_iteration, tot_iter):
+            
+            start = time.time()
+            use_adaptation_mode = it % self.dagger_update_freq == 0 # Determines when to swap encoders
+
+            # Rollout
+            with torch.inference_mode():
+                for i in range(self.num_steps_per_env):
+
+                    # Call PPO act() method
+                    actions = self.alg.act(obs, privileged_obs, critic_obs, true_estimated_obs, scan_obs, adaptation_mode=use_adaptation_mode)
+
+                    # Step the environment
+                    obs, privileged_obs, critic_obs, true_estimated_obs, scan_obs, rewards, dones, infos = self.env.step(actions) # legged_robot.py env step
+                    obs, privileged_obs, critic_obs, true_estimated_obs, scan_obs, rewards, dones = obs.to(self.device), privileged_obs.to(self.device), critic_obs.to(self.device), true_estimated_obs.to(self.device), scan_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                    
+                    # Handle storage of rewards, dones, and infos into Transition object
+                    self.alg.process_env_step(rewards, dones, infos)
+                    
+                    if self.log_dir is not None:
+                        # Book keeping
+                        if 'episode' in infos:
+                            ep_infos.append(infos['episode'])
+                        cur_reward_sum += rewards
+                        cur_episode_length += 1
+                        new_ids = (dones > 0).nonzero(as_tuple=False)
+                        rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                        lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                        cur_reward_sum[new_ids] = 0
+                        cur_episode_length[new_ids] = 0
+
+                stop = time.time()
+                collection_time = stop - start
+
+                # Learning step
+                start = stop
+                self.alg.compute_returns(critic_obs)
+
+            if use_adaptation_mode:
+                mean_adaptation_loss = self.alg.update_dagger()
+                
+            else:
+                mean_value_loss, mean_surrogate_loss, mean_regularization_loss, reg_coef, mean_estimator_loss = self.alg.update()
+
+            stop = time.time()
+            learn_time = stop - start
+            if self.log_dir is not None:
+                self.log(locals())
+            if it % self.save_interval == 0:
+                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+            ep_infos.clear()
+        
+        self.current_learning_iteration += num_learning_iterations
+        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+
+    def log(self, locs, width=80, pad=35):
+        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+        self.tot_time += locs['collection_time'] + locs['learn_time']
+        iteration_time = locs['collection_time'] + locs['learn_time']
+
+        ep_string = f''
+        if locs['ep_infos']:
+            for key in locs['ep_infos'][0]:
+                infotensor = torch.tensor([], device=self.device)
+                for ep_info in locs['ep_infos']:
+                    # handle scalar and zero dimensional tensor infos
+                    if not isinstance(ep_info[key], torch.Tensor):
+                        ep_info[key] = torch.Tensor([ep_info[key]])
+                    if len(ep_info[key].shape) == 0:
+                        ep_info[key] = ep_info[key].unsqueeze(0)
+                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                value = torch.mean(infotensor)
+                self.writer.add_scalar('Episode/' + key, value, locs['it'])
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        mean_std = self.alg.actor_critic.std.mean()
+        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+
+        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
+        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
+        self.writer.add_scalar('Loss/regularization', locs['mean_regularization_loss'], locs['it'])
+        self.writer.add_scalar('Loss/regularization coef', locs['reg_coef'], locs['it'])
+        self.writer.add_scalar('Loss/adaptation', locs['mean_adaptation_loss'], locs['it'])
+        self.writer.add_scalar('Loss/estimator', locs['mean_estimator_loss'], locs['it'])
+
+        self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
+        self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
+        self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
+        self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+    
+
+        if len(locs['rewbuffer']) > 0:
+            self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
+            self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
+            self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
+            self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+
+        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+
+        if len(locs['rewbuffer']) > 0:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Adaptation loss:':>{pad}} {locs['mean_adaptation_loss']:.4f}\n"""
+                          f"""{'Regularization loss:':>{pad}} {locs['mean_regularization_loss']:.4f}\n"""
+                          f"""{'Regularization coef:':>{pad}} {locs['reg_coef']:.4f}\n"""
+                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+        else:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Adaptation loss:':>{pad}} {locs['mean_adaptation_loss']:.4f}\n"""
+                          f"""{'Regularization loss:':>{pad}} {locs['mean_regularization_loss']:.4f}\n"""
+                          f"""{'Regularization coef:':>{pad}} {locs['reg_coef']:.4f}\n"""
+                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+
+        log_string += ep_string
+        log_string += (f"""{'-' * width}\n"""
+                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
+                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
+                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
+                       f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
+                               locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
+        print(log_string)
+
+    def save(self, path, infos=None):
+        torch.save({
+            'model_state_dict': self.alg.actor_critic.state_dict(),
+            'optimizer_state_dict': self.alg.optimizer.state_dict(),
+            'iter': self.current_learning_iteration,
+            'infos': infos,
+            }, path)
+
+    def load(self, path, load_optimizer=True):
+        loaded_dict = torch.load(path)
+        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+        if load_optimizer:
+            self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
+        self.current_learning_iteration = loaded_dict['iter']
+        return loaded_dict['infos']
+
+    def get_inference_policy(self, device=None, stochastic=False):
+        self.alg.actor_critic.eval()  # Switch to evaluation mode
+        if device is not None:
+            self.alg.actor_critic.to(device)
+        
+        if stochastic:
+            # Return full policy that samples from distribution
+            return self.alg.actor_critic.act
+        else:
+            # Return deterministic policy that returns mean actions
+            return self.alg.actor_critic.act_inference
