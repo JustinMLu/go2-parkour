@@ -2,8 +2,6 @@
 
 ## *Using End-to-End Reinforcement Learning for Robot Parkour* ##
 
-https://github.com/user-attachments/assets/b4d05b9f-c81f-4103-9452-c1887bcc6501
-
 https://github.com/user-attachments/assets/832f0158-6598-40ce-ad40-ebed43a1a39d
 
 ---
@@ -17,6 +15,7 @@ This repo takes `legged_gym` from the Robotics Systems Lab and adds:
 -   Trainable computer vision neural network
 -   Parkour terrain for radical parkour purposes
 -   Xbox controller support
+
 ---
 
 ### 🚧 Installation ###
