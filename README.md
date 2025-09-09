@@ -1,4 +1,6 @@
-# Go2 Parkour  #
+# Go2 Parkour #
+
+## *Using End-to-End Reinforcement Learning for Robot Parkour* ##
 
 <img src="https://github.com/user-attachments/assets/1a5062e2-f062-4528-929f-09ea0b1da057" width="400"/>
 <img src="https://github.com/user-attachments/assets/aafa9d2f-bfbf-452e-8215-3e1fd6227e85" width="400"/>
@@ -31,7 +33,7 @@ This repo takes `legged_gym` from the Robotics Systems Lab and adds:
    - Troubleshooting docs: `isaacgym/docs/index.html`
 5. Install the version of rsl_rl that comes with this repository
    -  `cd go2-parkour/rsl_rl && pip install -e .` 
-6. Install this repo
+6. Install
    - `cd go2-parkour && pip install -e .`
 
 ---
