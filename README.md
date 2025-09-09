@@ -2,9 +2,8 @@
 
 ## *Using End-to-End Reinforcement Learning for Robot Parkour* ##
 
-<img src="https://github.com/user-attachments/assets/1a5062e2-f062-4528-929f-09ea0b1da057" width="400"/>
-<img src="https://github.com/user-attachments/assets/aafa9d2f-bfbf-452e-8215-3e1fd6227e85" width="400"/>
-
+<video src="readme-assets/parkour.mp4" width="800" height="400" controls></video>
+<video src="readme-assets/controller.mp4" width="800" height="400" controls></video>
 ---
 
 RL framework for teaching the Unitree Go2 robot to do parkour autonomously. Includes deployment code for the Go2 EDU. 
