@@ -40,13 +40,13 @@ Thumbs.db
 *.exe
 *.war
 
-# Large media files
-*.mp4
-*.tiff
-*.avi
-*.flv
-*.mov
-*.wmv
+# # Large media files
+# *.mp4
+# *.tiff
+# *.avi
+# *.flv
+# *.mov
+# *.wmv
 
 # VS Code
 .vscode
