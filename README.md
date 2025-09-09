@@ -1,22 +1,17 @@
-# ARCAD Gym  #
+# Go2 Parkour  #
 
 <img src="https://github.com/user-attachments/assets/1a5062e2-f062-4528-929f-09ea0b1da057" width="400"/>
 <img src="https://github.com/user-attachments/assets/aafa9d2f-bfbf-452e-8215-3e1fd6227e85" width="400"/>
 
 ---
 
-ARCAD Gym is an in-house extension of legged_gym for the Agile Robotics Control and Design (ARCAD) Group, at the University of Michigan. This fork adds a sim-to-sim-to-real inference pipeline from Isaac Sim to Mujoco and then onto the real robot and completely reimplements Regularized Online Adaptation (ROA). Bugfixes to the terrain generation and base RL pipeline have also been made.
-
-
-Custom functions implemented:
-- Regularized Online Adaptation (ROA) w/ MLP state estimator
-- Completely modular observation buffers in Isaac Gym - no more slicing a giant `self.obs_buf` tensor over and over
-- Fully-functional Mujoco and Go2 robot deployment scripts
-- Xbox controller support for Mujoco and Isaac Sim 
-- The code is readable by a human being
-
-**Affiliation**: Justin Lu - ARCAD Lab, University of Michigan
-
+RL framework for teaching the Unitree Go2 robot to do parkour autonomously. Includes deployment code for the Go2 EDU. 
+This repo takes `legged_gym` from the Robotics Systems Lab and adds:
+-   Sim-to-sim-to-real inference pipeline (IsaacGym -> MuJoCo -> Real Deployment)
+-   Regularized Online Adaptation (ROA)
+-   Trainable computer vision neural network
+-   Parkour terrain for radical parkour purposes
+-   Xbox controller support
 ---
 
 ### 🚧 Installation ###
@@ -35,9 +30,9 @@ Custom functions implemented:
     `cd examples && python 1080_balls_of_solitude.py`
    - Troubleshooting docs: `isaacgym/docs/index.html`
 5. Install the version of rsl_rl that comes with this repository
-   -  `cd arcad_gym/rsl_rl && pip install -e .` 
-6. Install arcad_gym
-   - `cd arcad_gym && pip install -e .`
+   -  `cd go2-parkour/rsl_rl && pip install -e .` 
+6. Install this repo
+   - `cd go2-parkour && pip install -e .`
 
 ---
 
@@ -51,7 +46,8 @@ Playing a policy automatically exports its network components to `logs/{experime
 ---
 
 ### 🖥️ Training a Parkour Policy ###
-Currently, ```ARCAD Gym``` is optimized for quadrupedal robot parkour. Follow these steps to train and deploy a policy for the unitree Go2 that can eprform complex maneuvers like hurdles and jumps on & over objects.
+Follow these steps to train and deploy a policy for the unitree Go2 that can eprform complex maneuvers like hurdles and jumps on & over objects. 
+-   **IMPORTANT:** Deployment will get better over time! I need to tweak the Go2 ROS installation to publish LiDAR and vision ROS Topics even when in low-level control mode!
 
 1. Train the base parkour policy:  
   ```python legged_gym/scripts/train.py --task=go2_parkour --headless```
